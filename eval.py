@@ -12,21 +12,21 @@ import os
 
 import tensorflow as tf
 import numpy as np
+import sys
 
-from hyperparams import Hyperparams as hp
-from data_load import load_test_data, load_de_vocab, load_en_vocab
+from hyperparams import Hyperparams
+from data_load import load_data, load_vocab
 from train import Graph
 from nltk.translate.bleu_score import corpus_bleu
 
-def eval(): 
+def eval(hp):
     # Load graph
-    g = Graph(is_training=False)
+    g = Graph(hp, is_training=False)
     print("Graph loaded")
     
     # Load data
-    X, Sources, Targets = load_test_data()
-    de2idx, idx2de = load_de_vocab()
-    en2idx, idx2en = load_en_vocab()
+    X, Y, Sources, Targets = load_data(hp, hp.test_path)
+    word2idx, idx2word = load_vocab(hp)
      
 #     X, Sources, Targets = X[:33], Sources[:33], Targets[:33]
      
@@ -42,8 +42,10 @@ def eval():
             mname = open(hp.logdir + '/checkpoint', 'r').read().split('"')[1] # model name
              
             ## Inference
-            if not os.path.exists('results'): os.mkdir('results')
-            with codecs.open("results/" + mname, "w", "utf-8") as fout:
+            res_dir = os.path.dirname(hp.res_path)
+            if not os.path.exists(res_dir):
+                os.makedirs(res_dir)
+            with codecs.open(hp.res_path, "w", "utf-8") as fout:
                 list_of_refs, hypotheses = [], []
                 for i in range(len(X) // hp.batch_size):
                      
@@ -60,12 +62,12 @@ def eval():
                      
                     ### Write to file
                     for source, target, pred in zip(sources, targets, preds): # sentence-wise
-                        got = " ".join(idx2en[idx] for idx in pred).split("</S>")[0].strip()
+                        got = " ".join(idx2word[idx] for idx in pred).split("</S>")[0].strip()
                         fout.write("- source: " + source +"\n")
                         fout.write("- expected: " + target + "\n")
                         fout.write("- got: " + got + "\n\n")
                         fout.flush()
-                          
+
                         # bleu score
                         ref = target.split()
                         hypothesis = got.split()
@@ -78,7 +80,13 @@ def eval():
                 fout.write("Bleu Score = " + str(100*score))
                                           
 if __name__ == '__main__':
-    eval()
+    conf_dir = './conf/'
+    dataset = 'lenovo'
+    if len(sys.argv) > 1:
+        dataset = sys.argv[1]
+    hp = Hyperparams(os.path.join(conf_dir, '%s.conf' % dataset))
+
+    eval(hp)
     print("Done")
     
     
