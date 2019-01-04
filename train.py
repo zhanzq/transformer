@@ -191,7 +191,7 @@ if __name__ == '__main__':
         for epoch in range(1, hp.num_epochs+1):
             if sv.should_stop():
                 break
-            # g.num_batch = 2
+            g.num_batch = 2
             for step in tqdm(range(g.num_batch), total=g.num_batch, ncols=70, leave=False, unit='b'):
                 _, batch_loss = sess.run([g.train_op, g.mean_loss])
 
