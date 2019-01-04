@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 #/usr/bin/python2
 '''
-June 2017 by kyubyong park. 
-kbpark.linguist@gmail.com.
-https://www.github.com/kyubyong/transformer
+June 2017 by zhanzq.
+zhanzhqiang09@126.com
+https://www.github.com/zhanzq/transformer
 '''
 from __future__ import print_function
 import tensorflow as tf
