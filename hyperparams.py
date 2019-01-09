@@ -20,15 +20,17 @@ class Hyperparams:
 
         # default set
         self.project_dir = '/Users/zhanzq/github/transformer/'
-        self.dataset = 'lenovo'
+        self.dataset = 'trec'
         self.data_dir = '/Users/zhanzq/github/transformer/corpora'
         # data
-        self.train_path = '/Users/zhanzq/github/transformer/corpora/lenovo/train.txt'
-        self.test_path = '/Users/zhanzq/github/transformer/corpora/lenovo/test.txt'
-        self.vocab_path = '/Users/zhanzq/github/dct/lenovo/vocab.tsv'
-        self.res_path = '/Users/zhanzq/github/transformer/results/lenovo/res.txt'
+        self.train_path = '/Users/zhanzq/github/transformer/corpora/trec/train'
+        self.valid_path = '/Users/zhanzq/github/transformer/corpora/trec/valid'
+        self.test_path = '/Users/zhanzq/github/transformer/corpora/trec/test'
+        self.vocab_path = '/Users/zhanzq/github/dct/trec/vocab.tsv'
+        self.res_path = '/Users/zhanzq/github/transformer/results/trec/res.txt'
         self.logdir = '/Users/zhanzq/github/transformer/logdir/'  # log directory
         self.max_voc_sz = 10000
+        self.num_labels = 6
 
         # training
         self.batch_size = 32  # alias = N
@@ -50,11 +52,14 @@ class Hyperparams:
             self.dataset = dct["dataset"]
             self.data_dir = dct["data_dir"]
             self.train_path = dct["train_path"]
+            self.valid_path = dct["valid_path"]
             self.test_path = dct["test_path"]
             self.vocab_path = dct["vocab_path"]
             self.res_path = dct["res_path"]
             self.logdir = dct["logdir"]
             self.max_voc_sz = dct["max_voc_sz"]
+            self.num_labels = dct["num_labels"]
+
             self.batch_size = dct["batch_size"]
             self.lr = dct["lr"]
             self.maxlen = dct["maxlen"]

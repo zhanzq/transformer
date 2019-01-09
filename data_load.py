@@ -27,23 +27,21 @@ def load_vocab(hp):
     return word2idx, idx2word
 
 
-def create_data(hp, source_sents, target_sents):
+def create_data(hp, source_sents, labels):
     word2idx, idx2word = load_vocab(hp)
 
     # Index
     x_list, y_list, Sources, Targets = [], [], [], []
-    for source_sent, target_sent in zip(source_sents, target_sents):
+    for source_sent, label in zip(source_sents, labels):
         x = [word2idx.get(word, 1) for word in (source_sent + u" </S>").split()]  # 1: OOV, </S>: End of Text
-        y = [word2idx.get(word, 1) for word in (target_sent + u" </S>").split()]
 
         # truncate
         x = x[:hp.maxlen]
-        y = y[:hp.maxlen]
 
         x_list.append(np.array(x))
-        y_list.append(np.array(y))
+        y_list.append(label)
         Sources.append(source_sent)
-        Targets.append(target_sent)
+        Targets.append(label)
 
         # drop directly
         # if max(len(x), len(y)) <=hp.maxlen:
@@ -54,32 +52,37 @@ def create_data(hp, source_sents, target_sents):
 
     # Pad
     X = np.zeros([len(x_list), hp.maxlen], np.int32)
-    Y = np.zeros([len(y_list), hp.maxlen], np.int32)
-    for i, (x, y) in enumerate(zip(x_list, y_list)):
+    Y = np.array(y_list)
+    for i, x in enumerate(x_list):
         X[i] = np.lib.pad(x, [0, hp.maxlen - len(x)], 'constant', constant_values=(0, 0))
-        Y[i] = np.lib.pad(y, [0, hp.maxlen - len(y)], 'constant', constant_values=(0, 0))
-
     return X, Y, Sources, Targets
 
 
 def load_data(hp, data_path):
-    s_sents, t_sents = [], []
-    with codecs.open(data_path, 'r', 'utf-8') as fin:
-        line_num = 0
-        s_sen = fin.readline()
-        while s_sen != '':
-            t_sen = fin.readline()
-            s_sen = clean_data(s_sen)
-            t_sen = clean_data(t_sen)
-            if s_sen and t_sen:
-                s_sents.append(s_sen)
-                t_sents.append(t_sen)
-            line_num += 2
-            # if line_num % 100 == 0:
-            #     print('read %d lines' % line_num)
-            s_sen = fin.readline()
+    s_sents, labels = [], []
+    label2id = {}
+    for label in hp.labels:
+        label2id[label] = len(label2id)
 
-    X, Y, Sources, Targets = create_data(hp, s_sents, t_sents)
+    fnames = os.listdir(data_path)
+    for fin_path in fnames:
+        with codecs.open(fin_path, 'r', 'utf-8') as fin:
+            line_num = 0
+            s_sen = fin.readline()
+            while s_sen != '':
+                label = fin.readline()
+                s_sen = clean_data(s_sen)
+                if s_sen:
+                    s_sents.append(s_sen)
+                    line_num += 1
+                # if line_num % 100 == 0:
+                #     print('read %d lines' % line_num)
+                s_sen = fin.readline()
+
+            label = fin_path.split('.')[0]  # file name is the label
+            labels.extend([label2id[label]] * line_num)
+
+    X, Y, Sources, Targets = create_data(hp, s_sents, labels)
 
     return X, Y, Sources, Targets
 
