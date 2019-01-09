@@ -24,23 +24,18 @@ class Graph():
                 self.x, self.y, self.num_batch = get_batch_data(hp)  # (N, T)
             else:  # inference
                 self.x = tf.placeholder(tf.int32, shape=(None, hp.maxlen))
-                self.y = tf.placeholder(tf.int32, shape=(None, hp.maxlen))
-
-            # define decoder inputs
-            self.decoder_inputs = tf.concat((tf.ones_like(self.y[:, :1]) * 2, self.y[:, :-1]), -1)  # 2:<S>
+                self.y = tf.placeholder(tf.int32, shape=(None))
 
             # Load vocabulary
             word2idx, idx2word = load_vocab(hp)
 
             ## Embedding
-            self.enc = embedding(self.x,
-                                 vocab_size=len(word2idx),
-                                 num_units=hp.hidden_units,
-                                 scale=True,
-                                 scope="embed")
-
-            # Encoder
-            with tf.variable_scope("encoder"):
+            with tf.variable_scope("embedding_layer"):
+                self.enc = embedding(self.x,
+                                     vocab_size=len(word2idx),
+                                     num_units=hp.hidden_units,
+                                     scale=True,
+                                     scope="embed")
 
                 ## Positional Encoding
                 if hp.sinusoid:
@@ -62,6 +57,10 @@ class Graph():
                 self.enc = tf.layers.dropout(self.enc,
                                              rate=hp.dropout_rate,
                                              training=tf.convert_to_tensor(is_training))
+
+
+            # Encoder
+            with tf.variable_scope("encoder"):
 
                 ## Blocks
                 for i in range(hp.num_blocks):
@@ -85,13 +84,13 @@ class Graph():
                     first_token_tensor = tf.squeeze(self.enc[:, 0:1, :], axis=1)
                     self.output_layer = tf.layers.dense(
                         first_token_tensor,
-                        hp.hidden_size,
+                        hp.hidden_units,
                         activation=tf.tanh,
-                        kernel_initializer=tf.truncated_normal_initializer(stddev=hp.initializer_range))
+                        kernel_initializer=tf.truncated_normal_initializer(stddev=0.02))
 
             output_weights = tf.get_variable(
-                "output_weights", [hp.num_labels, hp.hidden_size],
-                initializer=tf.truncated_normal_initializer(stddev=hp.initializer_range))
+                "output_weights", [hp.num_labels, hp.hidden_units],
+                initializer=tf.truncated_normal_initializer(stddev=0.02))   ## initializer_range
 
             output_bias = tf.get_variable(
                 "output_bias", [hp.num_labels], initializer=tf.zeros_initializer())
@@ -102,7 +101,7 @@ class Graph():
                     self.output_layer = tf.nn.dropout(self.output_layer, keep_prob=0.9)
 
                 logits = tf.matmul(self.output_layer, output_weights, transpose_b=True)
-                logits = tf.nn.bias_add(logits, output_bias)
+                self.logits = tf.nn.bias_add(logits, output_bias)
 
                 self.preds = tf.to_int32(tf.argmax(self.logits, axis=-1))
 
@@ -114,8 +113,8 @@ class Graph():
                 per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
                 self.loss = tf.reduce_mean(per_example_loss)
 
+            with tf.variable_scope("accuracy"):
                 self.acc = tf.reduce_mean(tf.to_float(tf.equal(self.preds, self.y)))
-
                 tf.summary.scalar('acc', self.acc)
 
             if is_training:
@@ -125,7 +124,7 @@ class Graph():
                 self.train_op = self.optimizer.minimize(self.loss, global_step=self.global_step)
 
                 # Summary
-                tf.summary.scalar('loss', self.loss)
+                tf.summary.scalar('batch_loss', self.loss)
                 self.merged = tf.summary.merge_all()
 
 
@@ -160,9 +159,9 @@ if __name__ == '__main__':
         for epoch in range(1, hp.num_epochs + 1):
             if sv.should_stop():
                 break
-            g.num_batch = 2
+            # g.num_batch = 8
             for step in tqdm(range(g.num_batch), total=g.num_batch, ncols=70, leave=False, unit='b'):
-                _, batch_loss = sess.run([g.train_op, g.mean_loss])
+                _, batch_loss = sess.run([g.train_op, g.loss])
 
             gs = sess.run(g.global_step)
             sv.saver.save(sess, os.path.join(hp.logdir, 'model_epoch_%02d_gs_%d' % (epoch, gs)))

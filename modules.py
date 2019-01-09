@@ -258,7 +258,7 @@ def multihead_attention(queries,
 
 def feedforward(inputs, 
                 num_units=[2048, 512],
-                scope="multihead_attention", 
+                scope="feedforward",
                 reuse=None):
     '''Point-wise feed forward net.
     

@@ -65,7 +65,8 @@ def load_data(hp, data_path):
         label2id[label] = len(label2id)
 
     fnames = os.listdir(data_path)
-    for fin_path in fnames:
+    for fname in fnames:
+        fin_path = os.path.join(data_path, fname)
         with codecs.open(fin_path, 'r', 'utf-8') as fin:
             line_num = 0
             s_sen = fin.readline()
@@ -79,7 +80,7 @@ def load_data(hp, data_path):
                 #     print('read %d lines' % line_num)
                 s_sen = fin.readline()
 
-            label = fin_path.split('.')[0]  # file name is the label
+            label = fname.split('.')[0]  # file name is the label
             labels.extend([label2id[label]] * line_num)
 
     X, Y, Sources, Targets = create_data(hp, s_sents, labels)

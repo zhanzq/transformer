@@ -24,14 +24,14 @@ class Hyperparams:
         self.data_dir = '/Users/zhanzq/github/transformer/corpora'
         # data
         self.train_path = '/Users/zhanzq/github/transformer/corpora/trec/train'
-        self.valid_path = '/Users/zhanzq/github/transformer/corpora/trec/valid'
+        self.valid_path = '/Users/zhanzq/github/transformer/corpora/trec/dev'
         self.test_path = '/Users/zhanzq/github/transformer/corpora/trec/test'
         self.vocab_path = '/Users/zhanzq/github/dct/trec/vocab.tsv'
         self.res_path = '/Users/zhanzq/github/transformer/results/trec/res.txt'
         self.logdir = '/Users/zhanzq/github/transformer/logdir/'  # log directory
         self.max_voc_sz = 10000
         self.num_labels = 6
-
+        self.labels = ["ABBR", "DESC", "ENTY", "HUM", "LOC", "NUM"]
         # training
         self.batch_size = 32  # alias = N
         self.lr = 0.0001  # learning rate. In paper, learning rate is adjusted to the global step.
@@ -59,7 +59,7 @@ class Hyperparams:
             self.logdir = dct["logdir"]
             self.max_voc_sz = dct["max_voc_sz"]
             self.num_labels = dct["num_labels"]
-
+            self.labels = dct["labels"].split(',')
             self.batch_size = dct["batch_size"]
             self.lr = dct["lr"]
             self.maxlen = dct["maxlen"]

@@ -57,6 +57,7 @@ def make_vocab(hp, fpath):
                     fnames.append(os.path.join(_fpath, fname))
 
         for _fpath in fnames:
+            print('process file : %s' % _fpath)
             text = codecs.open(_fpath, 'r', 'utf-8').read()
             text = clean_data(text)
             # text = regex.sub("[^\s\p{Latin}']", " ", text)
