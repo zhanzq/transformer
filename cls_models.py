@@ -14,6 +14,40 @@ from modules import *
 import os, codecs
 from tqdm import tqdm
 import sys
+import copy
+import json
+import collections
+import re
+
+import six
+
+
+def get_assignment_map_from_checkpoint(tvars, init_checkpoint):
+  """Compute the union of the current variables and checkpoint variables."""
+  assignment_map = {}
+  initialized_variable_names = {}
+
+  name_to_variable = collections.OrderedDict()
+  for var in tvars:
+    name = var.name
+    m = re.match("^(.*):\\d+$", name)
+    if m is not None:
+      name = m.group(1)
+    name_to_variable[name] = var
+
+  init_vars = tf.train.list_variables(init_checkpoint)
+
+  assignment_map = collections.OrderedDict()
+  for x in init_vars:
+    (name, var) = (x[0], x[1])
+    if name not in name_to_variable:
+      print("not found %s" % name)
+      continue
+    assignment_map[name] = name
+    initialized_variable_names[name] = 1
+    initialized_variable_names[name + ":0"] = 1
+
+  return (assignment_map, initialized_variable_names)
 
 
 def normalize(inputs,
@@ -60,7 +94,7 @@ def dropout(input_tensor, dropout_prob):
   if dropout_prob is None or dropout_prob == 0.0:
     return input_tensor
 
-  output = tf.nn.dropout(input_tensor, 1.0 - dropout_prob)
+  output = tf.nn.dropout(input_tensor, keep_prob=1.0 - dropout_prob)
   return output
 
 
@@ -81,12 +115,13 @@ def create_initializer(initializer_range=0.02):
 
 def multihead_attention(queries,
                         keys,
+                        config,
                         num_units=None,
                         num_heads=8,
-                        dropout_rate=0,
+                        hidden_dropout_rate=0.1,
+                        attention_dropout_rate=0.1,
                         is_training=True,
                         causality=False,
-                        scope="multihead_attention",
                         reuse=None):
     '''Applies multihead attention.
 
@@ -105,15 +140,15 @@ def multihead_attention(queries,
     Returns
       A 3d tensor with shape of (N, T_q, C)
     '''
-    with tf.variable_scope(scope, reuse=reuse):
+    with tf.variable_scope("self", reuse=reuse):
         # Set the fall back option for num_units
         if num_units is None:
             num_units = queries.get_shape().as_list[-1]
 
         # Linear projections
-        Q = tf.layers.dense(queries, num_units, activation=tf.nn.relu)  # (N, T_q, C)
-        K = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
-        V = tf.layers.dense(keys, num_units, activation=tf.nn.relu)  # (N, T_k, C)
+        Q = tf.layers.dense(queries, num_units, name="query", activation=tf.nn.relu)  # (N, T_q, C)
+        K = tf.layers.dense(keys, num_units, name="key", activation=tf.nn.relu)  # (N, T_k, C)
+        V = tf.layers.dense(keys, num_units, name="value", activation=tf.nn.relu)  # (N, T_k, C)
 
         # Split and concat
         Q_ = tf.concat(tf.split(Q, num_heads, axis=2), axis=0)  # (h*N, T_q, C/h)
@@ -153,7 +188,7 @@ def multihead_attention(queries,
         outputs *= query_masks  # broadcasting. (N, T_q, C)
 
         # Dropouts
-        outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
+        outputs = tf.layers.dropout(outputs, rate=attention_dropout_rate, training=tf.convert_to_tensor(is_training))
 
         # Weighted sum
         outputs = tf.matmul(outputs, V_)  # ( h*N, T_q, C/h)
@@ -161,51 +196,110 @@ def multihead_attention(queries,
         # Restore shape
         outputs = tf.concat(tf.split(outputs, num_heads, axis=0), axis=2)  # (N, T_q, C)
 
+    with tf.variable_scope("output"):
         # Residual connection
-        outputs += queries
+        attention_output = tf.layers.dense(
+            outputs,
+            config.hidden_size,
+            kernel_initializer=create_initializer(config.initializer_range))
+        attention_output = dropout(attention_output, hidden_dropout_rate)
+        attention_output = layer_norm(attention_output + queries)
 
-        # Normalize
-        outputs = normalize(outputs)  # (N, T_q, C)
-
-    return outputs
+    return attention_output
 
 
-def encoder_layer(config, encode_output, is_training):
+def gelu(input_tensor):
+  """Gaussian Error Linear Unit.
+
+  This is a smoother version of the RELU.
+  Original paper: https://arxiv.org/abs/1606.08415
+
+  Args:
+    input_tensor: float Tensor to perform activation.
+
+  Returns:
+    `input_tensor` with the GELU activation applied.
+  """
+  cdf = 0.5 * (1.0 + tf.erf(input_tensor / tf.sqrt(2.0)))
+  return input_tensor * cdf
+
+
+def get_activation(activation_string):
+  """Maps a string to a Python function, e.g., "relu" => `tf.nn.relu`.
+
+  Args:
+    activation_string: String name of the activation function.
+
+  Returns:
+    A Python function corresponding to the activation function. If
+    `activation_string` is None, empty, or "linear", this will return None.
+    If `activation_string` is not a string, it will return `activation_string`.
+
+  Raises:
+    ValueError: The `activation_string` does not correspond to a known
+      activation.
+  """
+
+  # We assume that anything that"s not a string is already an activation
+  # function, so we just return it.
+  if not isinstance(activation_string, six.string_types):
+    return activation_string
+
+  if not activation_string:
+    return None
+
+  act = activation_string.lower()
+  if act == "linear":
+    return None
+  elif act == "relu":
+    return tf.nn.relu
+  elif act == "gelu":
+    return gelu
+  elif act == "tanh":
+    return tf.tanh
+  else:
+    raise ValueError("Unsupported activation: %s" % act)
+
+
+def encoder_layer(config, inputs, is_training):
     ## Blocks
     all_layer_outputs = []
+    encode_output = inputs
     for layer_idx in range(config.num_hidden_layers):
         with tf.variable_scope("layer_%d" % layer_idx):
-            ### Multihead Attention
-            # self attention
-            with tf.variable_scope("self_attention"):
-                encode_output = multihead_attention(queries=encode_output,
-                                                       keys=encode_output,
-                                                       num_units=config.hidden_units,
-                                                       num_heads=config.num_heads,
-                                                       dropout_rate=config.dropout_rate,
-                                                       is_training=is_training,
-                                                       causality=False)
+            with tf.name_scope("self_attention"):
+                # self attention
+                with tf.variable_scope("attention"):
+                    encode_output = multihead_attention(queries=encode_output,
+                                                        keys=encode_output,
+                                                        config=config,
+                                                        num_units=config.hidden_size,
+                                                        num_heads=config.num_attention_heads,
+                                                        hidden_dropout_rate=config.hidden_dropout_prob,
+                                                        attention_dropout_rate=config.attention_probs_dropout_prob,
+                                                        is_training=is_training,
+                                                        causality=False)
 
-            with tf.variable_scope("feed_forward"):
-                # The activation is only applied to the "intermediate" hidden layer.
-                with tf.variable_scope("intermediate"):
-                    intermediate_output = tf.layers.dense(
-                                                        encode_output,
-                                                        config.intermediate_size,
-                                                        activation=config.intermediate_act_fn,
-                                                        kernel_initializer=create_initializer(config.initializer_range))
+                with tf.name_scope("feed_forward"):
+                    # The activation is only applied to the "intermediate" hidden layer.
+                    with tf.variable_scope("intermediate"):
+                        intermediate_output = tf.layers.dense(
+                                                            encode_output,
+                                                            config.intermediate_size,
+                                                            activation=get_activation(config.hidden_act),
+                                                            kernel_initializer=create_initializer(config.initializer_range))
 
-                # Down-project back to `hidden_size` then add the residual.
-                with tf.variable_scope("output"):
-                    layer_output = tf.layers.dense(
-                                                        intermediate_output,
-                                                        config.hidden_size,
-                                                        kernel_initializer=create_initializer(config.initializer_range))
-                layer_output = dropout(layer_output, config.hidden_dropout_prob)
-                layer_output += encode_output
-                layer_output = layer_norm(layer_output)
-                prev_layer_output = layer_output
-                all_layer_outputs.append(layer_output)
+                    # Down-project back to `hidden_size` then add the residual.
+                    with tf.variable_scope("output"):
+                        layer_output = tf.layers.dense(
+                                                            intermediate_output,
+                                                            config.hidden_size,
+                                                            kernel_initializer=create_initializer(config.initializer_range))
+                        layer_output = dropout(layer_output, config.hidden_dropout_prob)
+                        layer_output += encode_output
+                        layer_output = layer_norm(layer_output)
+                        prev_layer_output = layer_output
+                        all_layer_outputs.append(layer_output)
 
     return all_layer_outputs
 
@@ -219,21 +313,23 @@ def decoder_layer(config, encode_output, decode_output, is_training):
             # self attention
             with tf.variable_scope("self_attention"):
                 decode_output = multihead_attention(queries=decode_output,
-                                                       keys=decode_output,
-                                                       num_units=config.hidden_units,
-                                                       num_heads=config.num_heads,
-                                                       dropout_rate=config.dropout_rate,
-                                                       is_training=is_training,
-                                                       causality=False)
+                                                    keys=decode_output,
+                                                    num_units=config.hidden_units,
+                                                    num_heads=config.num_heads,
+                                                    hidden_dropout_rate=config.hidden_dropout_prob,
+                                                    attention_dropout_rate=config.attention_probs_dropout_prob,
+                                                    is_training=is_training,
+                                                    causality=False)
 
             with tf.variable_scope("vanilla_attention"):
                 decode_output = multihead_attention(queries=decode_output,
-                                                       keys=encode_output,
-                                                       num_units=config.hidden_units,
-                                                       num_heads=config.num_heads,
-                                                       dropout_rate=config.dropout_rate,
-                                                       is_training=is_training,
-                                                       causality=False)
+                                                    keys=encode_output,
+                                                    num_units=config.hidden_units,
+                                                    num_heads=config.num_heads,
+                                                    hidden_dropout_rate=config.hidden_dropout_prob,
+                                                    attention_dropout_rate=config.attention_probs_dropout_prob,
+                                                    is_training=is_training,
+                                                    causality=False)
             with tf.variable_scope("feed_forward"):
                 # The activation is only applied to the "intermediate" hidden layer.
                 with tf.variable_scope("intermediate"):
@@ -265,7 +361,6 @@ def embedding_layer(config, input_ids, token_type_ids, reuse=None):
                                                     embedding_size=config.hidden_size,
                                                     zero_pad=False,
                                                     scale=False,
-                                                    scope="embedding",
                                                     initializer_range=config.initializer_range,
                                                     word_embedding_name="word_embeddings",
                                                     reuse=reuse)
@@ -292,7 +387,6 @@ def embedding(input_ids,
               embedding_size=128,
               zero_pad=False,
               scale=False,
-              scope="embedding",
               initializer_range=0.02,
               word_embedding_name="word_embeddings",
               reuse=None):
@@ -352,7 +446,7 @@ def embedding(input_ids,
       [ 1.22204471 -0.96587461]]]
     ```
     '''
-    with tf.variable_scope(scope, reuse=reuse):
+    with tf.name_scope("embeddings_table"):
         lookup_table = tf.get_variable(
             name=word_embedding_name,
             shape=[vocab_size, embedding_size],
@@ -430,7 +524,7 @@ def embedding_postprocessor(input_tensor,
     one_hot_ids = tf.one_hot(flat_token_type_ids, depth=token_type_vocab_size)
     token_type_embeddings = tf.matmul(one_hot_ids, token_type_table)
     token_type_embeddings = tf.reshape(token_type_embeddings,
-                                       [batch_size, seq_length, width])
+                                       [-1, seq_length, width])
     output += token_type_embeddings
 
   if use_position_embeddings:
@@ -469,32 +563,105 @@ def embedding_postprocessor(input_tensor,
   return output
 
 
-class Transformer(object):
+class BertConfig(object):
+  """Configuration for `BertModel`."""
 
-    def __init__(self, config, num_labels=None, is_training=True):
+  def __init__(self,
+               vocab_size,
+               hidden_size=768,
+               num_hidden_layers=12,
+               num_attention_heads=12,
+               intermediate_size=3072,
+               hidden_act="gelu",
+               hidden_dropout_prob=0.1,
+               attention_probs_dropout_prob=0.1,
+               max_position_embeddings=512,
+               type_vocab_size=16,
+               initializer_range=0.02):
+    """Constructs BertConfig.
+
+    Args:
+      vocab_size: Vocabulary size of `inputs_ids` in `BertModel`.
+      hidden_size: Size of the encoder layers and the pooler layer.
+      num_hidden_layers: Number of hidden layers in the Transformer encoder.
+      num_attention_heads: Number of attention heads for each attention layer in
+        the Transformer encoder.
+      intermediate_size: The size of the "intermediate" (i.e., feed-forward)
+        layer in the Transformer encoder.
+      hidden_act: The non-linear activation function (function or string) in the
+        encoder and pooler.
+      hidden_dropout_prob: The dropout probability for all fully connected
+        layers in the embeddings, encoder, and pooler.
+      attention_probs_dropout_prob: The dropout ratio for the attention
+        probabilities.
+      max_position_embeddings: The maximum sequence length that this model might
+        ever be used with. Typically set this to something large just in case
+        (e.g., 512 or 1024 or 2048).
+      type_vocab_size: The vocabulary size of the `token_type_ids` passed into
+        `BertModel`.
+      initializer_range: The stdev of the truncated_normal_initializer for
+        initializing all weight matrices.
+    """
+    self.vocab_size = vocab_size
+    self.hidden_size = hidden_size
+    self.num_hidden_layers = num_hidden_layers
+    self.num_attention_heads = num_attention_heads
+    self.hidden_act = hidden_act
+    self.intermediate_size = intermediate_size
+    self.hidden_dropout_prob = hidden_dropout_prob
+    self.attention_probs_dropout_prob = attention_probs_dropout_prob
+    self.max_position_embeddings = max_position_embeddings
+    self.type_vocab_size = type_vocab_size
+    self.initializer_range = initializer_range
+
+  @classmethod
+  def from_dict(cls, json_object):
+    """Constructs a `BertConfig` from a Python dictionary of parameters."""
+    config = BertConfig(vocab_size=None)
+    for (key, value) in six.iteritems(json_object):
+      config.__dict__[key] = value
+    return config
+
+  @classmethod
+  def from_json_file(cls, json_file):
+    """Constructs a `BertConfig` from a json file of parameters."""
+    with tf.gfile.GFile(json_file, "r") as reader:
+      text = reader.read()
+    return cls.from_dict(json.loads(text))
+
+  def to_dict(self):
+    """Serializes this instance to a Python dictionary."""
+    output = copy.deepcopy(self.__dict__)
+    return output
+
+  def to_json_string(self):
+    """Serializes this instance to a JSON string."""
+    return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+
+
+class Transformer(object):
+    def __init__(self, config, max_seq_len=128, num_labels=None, learning_rate=1.0e-5, is_training=True):
         self.is_training = is_training
         self.inputs = {}
-        self.inputs["input_x"]          = tf.placeholder(tf.int32, shape=[None, config.max_seq_len])
-        self.inputs["input_y"]          = tf.placeholder(tf.int32, shape=[None, config.max_seq_len])
-        self.inputs["labels"]           = tf.placeholder(tf.int32, shape=[None])
-        self.inputs["x_token_type_ids"] = tf.placeholder(tf.int32, shape=[None, config.max_seq_len])
-        self.inputs["y_token_type_ids"] = tf.placeholder(tf.int32, shape=[None, config.max_seq_len])
+        self.inputs["input_ids"]   = tf.placeholder(tf.int32, shape=[None, max_seq_len])
+        self.inputs["input_mask"]  = tf.placeholder(tf.int32, shape=[None, max_seq_len])
+        self.inputs["segment_ids"] = tf.placeholder(tf.int32, shape=[None, max_seq_len])
+        self.inputs["label_ids"]   = tf.placeholder(tf.int32, shape=[None])
         self.num_labels = num_labels
-        self.build_model(config, is_training, self.inputs)
+        self.build_model(config, is_training, self.inputs, learning_rate=learning_rate)
 
-    def build_model(self, config, is_training, inputs):
-        input_x          = inputs["input_x"]
-        input_y          = inputs["input_y"]
-        labels           = inputs["labels"]
-        x_token_type_ids = inputs["x_token_type_ids"]
-        y_token_type_ids = inputs["y_token_type_ids"]
+    def build_model(self, config, is_training, inputs, learning_rate=1.0e-5):
+        input_ids   = inputs["input_ids"]
+        input_mask  = inputs["input_mask"]
+        segment_ids = inputs["segment_ids"]
+        label_ids   = inputs["label_ids"]
 
-        with tf.variable_scope(scope=None, default_name="transformer"):
+        with tf.variable_scope("bert"):
             with tf.variable_scope("embeddings"):
                 # Perform embedding lookup on the word ids.
                 embedding_x, self.embedding_table = embedding_layer(config=config,
-                                                                         input_ids=input_x,
-                                                                         token_type_ids=x_token_type_ids)
+                                                                         input_ids=input_ids,
+                                                                         token_type_ids=segment_ids)
 
             with tf.variable_scope("encoder"):
                 all_encoder_layers = encoder_layer(config=config,
@@ -517,77 +684,34 @@ class Transformer(object):
                                                 activation=tf.tanh,
                                                 kernel_initializer=create_initializer(config.initializer_range))
 
-            is_translation = False
-            if not is_translation:
-                with tf.variable_scope("accuracy"):
-                    # Final linear projection
-                    output_weights = tf.get_variable(
-                        "output_weights", [self.num_labels, config.hidden_size],
-                        initializer=tf.truncated_normal_initializer(stddev=0.02))
-                    output_bias = tf.get_variable(
-                        "output_bias", [self.num_labels], initializer=tf.zeros_initializer())
-
-                    self.logits = tf.matmul(self.pooled_output, output_weights, transpose_b=True)
-                    self.logits = tf.nn.bias_add(self.logits, output_bias)
-                    self.preds    = tf.to_int32(tf.argmax(self.logits, axis=-1))
-                    self.accuracy = tf.reduce_mean(tf.to_float(tf.equal(self.preds, labels)))
-
-                    tf.summary.scalar('acc', self.accuracy)
-
-                if is_training:
-                    # Loss
-                    with tf.variable_scope("loss"):
-                        self.loss       = tf.nn.softmax_cross_entropy_with_logits_v2(logits=self.logits,
-                                                                                     labels=labels)
-                        self.mean_loss  = tf.reduce_mean(self.loss)
-
-                        # Training Scheme
-                        self.global_step = tf.Variable(0, name='global_step', trainable=False)
-                        self.optimizer   = tf.train.AdamOptimizer(learning_rate=hp.lr, beta1=0.9, beta2=0.98, epsilon=1e-8)
-                        self.train_op    = self.optimizer.minimize(self.mean_loss, global_step=self.global_step)
-
-                        # Summary
-                        tf.summary.scalar('mean_loss', self.mean_loss)
-                        self.merged = tf.summary.merge_all()
-
-                    return
-
-            # only for translation and dialogue (such sequence2sequence tasks)
-            embedding_y, _ = embedding_layer(config=config,
-                                             input_ids=input_y,
-                                             token_type_ids=y_token_type_ids,
-                                             reuse=True)
-                # only for dialogue and translation
-            with tf.variable_scope("decoder"):
-                decoder_outputs = decoder_layer(config=config,
-                                                queries=embedding_y,
-                                                keys=embedding_x,
-                                                is_training=is_training)
-
+            self.pooled_output = dropout(self.pooled_output, dropout_prob=config.hidden_dropout_prob)
             with tf.variable_scope("accuracy"):
-                self.dec = decoder_outputs[-1]
                 # Final linear projection
-                self.logits   = tf.layers.dense(self.dec, config.vocab_size)
+                output_weights = tf.get_variable(
+                    "output_weights", [self.num_labels, config.hidden_size],
+                    initializer=tf.truncated_normal_initializer(stddev=0.02))
+                output_bias = tf.get_variable(
+                    "output_bias", [self.num_labels], initializer=tf.zeros_initializer())
+
+                self.logits = tf.matmul(self.pooled_output, output_weights, transpose_b=True)
+                self.logits = tf.nn.bias_add(self.logits, output_bias)
                 self.preds    = tf.to_int32(tf.argmax(self.logits, axis=-1))
-                self.istarget = tf.to_float(tf.not_equal(self.input_y, 0))
-                self.accuracy = tf.reduce_sum(tf.to_float(tf.equal(self.preds, self.input_y)) * self.istarget) / (
-                    tf.reduce_sum(self.istarget))
+                self.accuracy = tf.reduce_mean(tf.to_float(tf.equal(self.preds, label_ids)))
 
                 tf.summary.scalar('acc', self.accuracy)
 
             if is_training:
                 # Loss
                 with tf.variable_scope("loss"):
-                    self.y_smoothed = label_smoothing(tf.one_hot(self.y, depth=config.vocab_size))
-                    self.loss       = tf.nn.softmax_cross_entropy_with_logits_v2(logits=self.logits, labels=self.y_smoothed)
-                    self.mean_loss  = tf.reduce_sum(self.loss * self.istarget) / (tf.reduce_sum(self.istarget))
+                    self.loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.logits,
+                                                                                labels=label_ids)
+                    self.loss = tf.reduce_mean(self.loss)
 
                     # Training Scheme
                     self.global_step = tf.Variable(0, name='global_step', trainable=False)
-                    self.optimizer   = tf.train.AdamOptimizer(learning_rate=hp.lr, beta1=0.9, beta2=0.98, epsilon=1e-8)
-                    self.train_op    = self.optimizer.minimize(self.mean_loss, global_step=self.global_step)
+                    self.optimizer   = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.9, beta2=0.98, epsilon=1e-8)
+                    self.train_op    = self.optimizer.minimize(self.loss, global_step=self.global_step)
 
                     # Summary
-                    tf.summary.scalar('mean_loss', self.mean_loss)
+                    tf.summary.scalar('loss', self.loss)
                     self.merged = tf.summary.merge_all()
-
